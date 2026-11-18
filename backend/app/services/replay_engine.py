@@ -10,6 +10,7 @@ import hashlib
 import time
 from typing import Any
 
+from app.services import state_lifecycle as lifecycle
 from app.services.base import BaseModuleService
 from app.store import store
 
@@ -56,6 +57,20 @@ class ReplayEngineService(BaseModuleService):
         if not topo_found and topology_name:
             return {"ok": False, "error": f"拓扑配置「{topology_name}」不存在"}
 
+        restore_id = cp_row.get("restore_id")
+        version = lifecycle.get_restore_version(restore_id) if restore_id else None
+        restore_check = None
+        if restore_id:
+            restore_check = lifecycle.validate_restore_data(
+                restore_id, str(checkpoint_id),
+            )
+            if not restore_check.get("valid"):
+                return {
+                    "ok": False,
+                    "error": "状态恢复数据缺键，阻止创建回放任务",
+                    "restore_check": restore_check,
+                }
+
         # 3. 创建回放任务
         task_id = max(
             (int(r.get("id", 0)) for r in store.rows(self.MODULE)), default=0
@@ -73,6 +88,12 @@ class ReplayEngineService(BaseModuleService):
             "pending": True,
             "abnormal": False,
             "_checkpoint_snapshot": copy.deepcopy(cp_row),
+            "restore_id": restore_id,
+            "source_version": (
+                version.get("restore_id") if version
+                else cp_row.get("source_version")
+            ),
+            "_restore_check": copy.deepcopy(restore_check),
             "_created_at": time.time(),
         }
         store.rows(self.MODULE).append(replay_task)
@@ -84,10 +105,16 @@ class ReplayEngineService(BaseModuleService):
             "checkpoint_id": checkpoint_id,
             "topology": topology_name,
             "mode": mode,
+            "restore_id": restore_id,
+            "source_version": replay_task["source_version"],
         }
 
     def execute_replay(self, task_id: int) -> dict[str, Any]:
-        """执行回放任务：检查点状态快照回放 + 结果验证。"""
+        """执行回放任务：检查点状态快照回放 + 结果验证。
+
+        发布当前回放结果前，按状态压缩清单和活动引用重新校验状态恢复数据；
+        缺键时阻止发布，任务停留在「验证失败」并写入待办。
+        """
         task = store.find(self.MODULE, task_id)
         if task is None:
             return {"ok": False, "error": "回放任务不存在"}
@@ -96,6 +123,25 @@ class ReplayEngineService(BaseModuleService):
             return {"ok": False, "error": f"任务状态为「{task.get('status')}」, 不可回放"}
 
         task["status"] = "回放中"
+
+        restore_id = task.get("restore_id")
+        if restore_id:
+            restore_check = lifecycle.validate_restore_data(
+                restore_id, str(task.get("源检查点", "")),
+            )
+            if not restore_check.get("valid"):
+                task["status"] = "验证失败"
+                task["结果验证"] = "blocked"
+                task["_restore_check"] = restore_check
+                task["_publish_blocked_at"] = time.time()
+                self._raise_publish_todo(task, restore_check)
+                return {
+                    "ok": False,
+                    "task_id": task_id,
+                    "error": "状态恢复数据缺键，阻止发布当前回放结果",
+                    "published": False,
+                    "restore_check": restore_check,
+                }
 
         # 获取检查点快照中的状态数据
         cp_snapshot = task.get("_checkpoint_snapshot", {})
@@ -137,6 +183,8 @@ class ReplayEngineService(BaseModuleService):
         task["进度"] = "100%"
         task["status"] = "已完成" if verification["all_passed"] else "验证失败"
         task["_replay_results"] = replay_results
+        task["published"] = verification["all_passed"]
+        task["source_version"] = task.get("source_version")
 
         return {
             "ok": True,
@@ -144,6 +192,53 @@ class ReplayEngineService(BaseModuleService):
             "restored_operators": len(replay_results),
             "replay_results": replay_results,
             "verification": verification,
+        }
+
+    def _raise_publish_todo(
+        self, task: dict[str, Any], restore_check: dict[str, Any],
+    ) -> None:
+        """缺键阻断发布时给回放页面生成待办，重复阻断只更新同一条。"""
+        todos = store.rows(lifecycle.TODO_TABLE)
+        token = f"publish_blocked:replay_engine:{task.get('id')}"
+        for row in todos:
+            if row.get("token") == token:
+                row["updated_at"] = time.time()
+                row["status"] = "待处理"
+                return
+        todos.append({
+            "id": max((int(r.get("id", 0)) for r in todos), default=0) + 1,
+            "token": token,
+            "kind": "publish_blocked",
+            "module": "replay_engine",
+            "page": "replay_engine",
+            "config": task.get("源检查点", ""),
+            "mode": None,
+            "state_key": (restore_check.get("missing_keys") or [None])[0],
+            "message": "状态恢复数据缺键，当前回放结果未发布",
+            "status": "待处理",
+            "receipt_id": None,
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        })
+
+    def verify_before_publish(self, task_id: int) -> dict[str, Any]:
+        """回放页面确认：共享键没有被提前移除，恢复数据仍保留全部分组。"""
+        task = store.find(self.MODULE, task_id)
+        if task is None:
+            return {"ok": False, "error": "回放任务不存在"}
+        restore_id = task.get("restore_id")
+        if not restore_id:
+            return {"ok": True, "publishable": True, "restore_id": None}
+        result = lifecycle.validate_restore_data(
+            restore_id, str(task.get("源检查点", "")),
+        )
+        return {
+            "ok": True,
+            "task_id": task_id,
+            "restore_id": restore_id,
+            "source_version": task.get("source_version"),
+            "publishable": bool(result.get("valid")),
+            "restore_check": result,
         }
 
     def _verify_replay_results(
@@ -181,6 +276,8 @@ class ReplayEngineService(BaseModuleService):
                 "结果验证": task.get("结果验证", "待验证"),
                 "进度": task.get("进度", "0%"),
                 "status": task.get("status", ""),
+                "restore_id": task.get("restore_id"),
+                "source_version": task.get("source_version"),
             }
             # 查找关联的恢复方案
             for rp in store.rows("restore_plan"):

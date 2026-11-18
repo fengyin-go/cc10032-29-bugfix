@@ -8,6 +8,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from app.services import state_lifecycle as lifecycle
 from app.services.base import BaseModuleService
 from app.store import store
 
@@ -184,6 +185,14 @@ class RestorePlanService(BaseModuleService):
         )
         checks.append({"source": "state_store", "ok": state_restored})
 
+        # 检查状态恢复数据：仍有引用的分组必须全部保留，且每个键只有一个活动版本
+        restore_check = self.check_restore_data(scope)
+        checks.append({
+            "source": "state_restore_data",
+            "ok": restore_check["all_valid"],
+            "detail": restore_check["summary"],
+        })
+
         all_ok = all(c["ok"] for c in checks)
         if all_ok:
             plan["status"] = "已生效"
@@ -194,6 +203,68 @@ class RestorePlanService(BaseModuleService):
             "plan": plan_name,
             "scope": scope,
             "checks": checks,
+        }
+
+    def check_restore_data(self, scope: str) -> dict[str, Any]:
+        """按范围核对状态恢复数据：分组齐全、来源版本可追溯、活动版本唯一。"""
+        index = lifecycle.build_key_index()
+        keys = []
+        for key in sorted(index):
+            info = index[key]
+            # 只核对真正承载算子引用的状态键，跳过纯配置行
+            has_operator_ref = any(
+                row.get("_operator") or row.get("_state_key") or row.get("state_key")
+                for row in info["rows"]
+            )
+            has_version = lifecycle.active_restore_version(key) is not None
+            if not (has_operator_ref or has_version):
+                continue
+            if scope and scope not in key and not any(
+                scope in str(row.get("配置名称", "")) for row in info["rows"]
+            ):
+                continue
+            keys.append(key)
+        entries = []
+        for key in keys:
+            active = lifecycle.active_restore_version(key)
+            info = index[key]
+            ttl = lifecycle.parse_ttl(
+                info["rows"][0].get("TTL时长") if info["rows"] else None, None,
+            )
+            expected = {
+                (item["operator"], item["group"])
+                for item in lifecycle.group_payload(info, time.time(), ttl)
+            }
+            retained = {
+                (item["operator"], item["group"])
+                for item in (active or {}).get("groups", [])
+            }
+            needs_version = active is not None or info["pinned"]
+            entries.append({
+                "state_key": key,
+                "restore_id": active.get("restore_id") if active else None,
+                "source_version": active.get("source_version") if active else None,
+                "pinned": info["pinned"],
+                "expected_groups": len(expected),
+                "retained_groups": len(retained),
+                "missing_groups": [
+                    {"operator": operator, "group": group}
+                    for operator, group in sorted(expected - retained)
+                ],
+                "status": (
+                    "已生成" if active is not None
+                    else ("缺状态恢复数据" if info["pinned"] else "未生成")
+                ),
+                "valid": (not (expected - retained)) if active is not None
+                else not needs_version,
+            })
+        valid_count = sum(1 for entry in entries if entry["valid"])
+        return {
+            "ok": True,
+            "scope": scope,
+            "entries": entries,
+            "all_valid": bool(entries) and valid_count == len(entries),
+            "summary": f"{valid_count}/{len(entries)} 个状态键的恢复数据完整",
         }
 
     def list_recovery_plans_with_status(self) -> list[dict[str, Any]]:

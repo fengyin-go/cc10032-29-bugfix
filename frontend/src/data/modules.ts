@@ -222,6 +222,17 @@ export const MODULES: ModuleMeta[] = [
     actionTargets: {"启动任务": "待启动", "停止任务": "运行中"},
     metrics: ["任务总数", "运行中数", "失败数"],
   },
+  {
+    key: "replay_engine",
+    name: "回放引擎",
+    entity: "回放任务",
+    desc: "消费检查点快照执行数据回放，发布前按状态压缩清单和活动引用复核恢复数据",
+    fields: ["任务名称", "源检查点", "目标拓扑", "回放模式", "起始位点", "结果验证", "进度"],
+    statuses: ["草稿", "待回放", "回放中", "已完成", "验证失败"],
+    actions: ["启动回放", "暂停回放", "标记完成"],
+    actionTargets: {"启动回放": "待回放", "暂停回放": "回放中", "标记完成": "已完成"},
+    metrics: ["任务总数", "回放中", "验证失败"],
+  },
 ]
 
 export const MODULE_BY_KEY: Map<string, ModuleMeta> = new Map(

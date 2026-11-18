@@ -1,6 +1,7 @@
 """示例数据：每个模块给几条不同状态的记录，方便起服务后立刻看到内容。"""
 from __future__ import annotations
 
+import time
 from typing import Any
 
 SEED_ROWS: dict[str, list[dict[str, Any]]] = {
@@ -764,3 +765,170 @@ SEED_ROWS: dict[str, list[dict[str, Any]]] = {
   '结果验证': '回放引擎样例3',
   '进度': '回放引擎样例3'}],
 }
+
+# 序号29演示数据：同一个状态键被两个算子引用、过期时间不同，并有一个被检查点占用。
+# 运行期追加，保证留痕数据能直接看到共享键与状态恢复数据的联动。
+_SEQ29_STATE_ROWS = [
+    {
+        "id": 2901,
+        "配置名称": "实时聚合状态1",
+        "后端类型": "rocksdb",
+        "状态键模式": "operator://window_agg/region",
+        "TTL时长": "30",
+        "检查点间隔": "10",
+        "增量模式": "incremental",
+        "清理策略": "ttl_expire",
+        "status": "已生效",
+        "pending": True,
+        "abnormal": False,
+        "_state_key": "operator://window_agg/region",
+        "_operator": "window_agg_main",
+        "_group": "region=cn-east",
+        "_aggregates": {"count": 12.0, "sum": 480.5},
+        "_ttl_seconds": 30.0,
+    },
+    {
+        "id": 2902,
+        "配置名称": "实时聚合状态1",
+        "后端类型": "rocksdb",
+        "状态键模式": "operator://window_agg/region",
+        "TTL时长": "300",
+        "检查点间隔": "10",
+        "增量模式": "incremental",
+        "清理策略": "ttl_expire",
+        "status": "已生效",
+        "pending": True,
+        "abnormal": False,
+        "_state_key": "operator://window_agg/region",
+        "_operator": "window_agg_shadow",
+        "_group": "region=cn-north",
+        "_aggregates": {"count": 7.0, "sum": 210.0},
+        "_ttl_seconds": 300.0,
+    },
+    {
+        "id": 2903,
+        "配置名称": "实时聚合状态1",
+        "后端类型": "rocksdb",
+        "状态键模式": "operator://window_agg/region",
+        "TTL时长": "30",
+        "检查点间隔": "10",
+        "增量模式": "incremental",
+        "清理策略": "ttl_expire",
+        "status": "已生效",
+        "pending": True,
+        "abnormal": False,
+        "_state_key": "operator://window_agg/region",
+        "_operator": "window_agg_main",
+        "_group": "region=cn-east",
+        "_aggregates": {"count": 9.0, "sum": 350.0},
+        "_ttl_seconds": 30.0,
+    },
+]
+
+# 运行时补齐时间戳（种子是静态数据，这里按启动时刻回填相对时间）。
+_NOW = time.time()
+_SEQ29_STATE_ROWS[0]["_timestamp"] = _NOW - 600      # 已过期，但同键仍有活动引用
+_SEQ29_STATE_ROWS[1]["_timestamp"] = _NOW - 10       # 另一个算子仍活跃
+_SEQ29_STATE_ROWS[2]["_timestamp"] = _NOW - 900      # 同算子的旧快照，可被压缩
+
+_SEQ29_PINNED_STATE_ROWS = [
+    {
+        "id": 2904,
+        "配置名称": "流关联状态1",
+        "后端类型": "rocksdb",
+        "状态键模式": "operator://join_state/window",
+        "TTL时长": "60",
+        "检查点间隔": "15",
+        "增量模式": "full",
+        "清理策略": "keep_for_checkpoint",
+        "status": "已生效",
+        "pending": False,
+        "abnormal": False,
+        "_state_key": "operator://join_state/window",
+        "_operator": "join_stream_main",
+        "_group": "window=15s",
+        "_aggregates": {"matched": 21.0},
+        "_ttl_seconds": 60.0,
+        "_timestamp": _NOW - 7200,   # 早已过期，但检查点仍引用该键
+    },
+]
+
+_SEQ29_CHECKPOINT_ROWS = [
+    {
+        "id": 2901,
+        "配置名称": "检查点样例2",
+        "间隔时间": "15",
+        "超时时长": "60",
+        "最大并发": "2",
+        "对齐策略": "exactly_once",
+        "保留数量": 5,
+        "外部化路径": "/data/checkpoints/seq29",
+        "status": "已启用",
+        "pending": False,
+        "abnormal": False,
+        "checkpoint_id": "cp_seq29_demo",
+        "operator_states": {
+            "join_stream_main": {"_state_key": "operator://join_state/window", "matched": 21},
+        },
+        "state_key_manifest": ["operator://join_state/window"],
+        "restore_id": "restore://operator://join_state/window/deferred/v1",
+        "source_version": None,
+        "snapshot_ts": _NOW - 60,
+    },
+]
+
+# 检查点绑定的状态恢复数据：被检查点引用的键在清理时必须保留。
+_SEQ29_RESTORE_ROWS = [
+    {
+        "id": 2901,
+        "restore_id": "restore://operator://join_state/window/deferred/v1",
+        "state_key": "operator://join_state/window",
+        "config": "流关联状态1",
+        "mode": "deferred",
+        "version": 1,
+        "status": "活动",
+        "source_version": None,
+        "source_manifest_id": None,
+        "groups": [
+            {
+                "operator": "join_stream_main",
+                "group": "window=15s",
+                "state_id": 2904,
+                "aggregates": {"matched": 21.0},
+                "reference_state": "expired",
+            },
+        ],
+        "group_count": 1,
+        "operators": ["join_stream_main"],
+        "checkpoint_ids": ["cp_seq29_demo"],
+        "retained": True,
+        "receipt_id": None,
+        "created_at": _NOW - 60,
+        "generated_from": "seed",
+    },
+]
+
+_SEQ29_REPLAY_ROWS = [
+    {
+        "id": 2901,
+        "任务名称": "回放_流关联状态",
+        "源检查点": "cp_seq29_demo",
+        "目标拓扑": "任务拓扑样例1",
+        "回放模式": "state_replay",
+        "起始位点": _NOW - 60,
+        "结果验证": "待验证",
+        "进度": "0%",
+        "status": "待回放",
+        "pending": True,
+        "abnormal": False,
+        "restore_id": "restore://operator://join_state/window/deferred/v1",
+        "source_version": None,
+        "_created_at": _NOW - 30,
+    },
+]
+
+SEED_ROWS.setdefault("state_store", []).extend(_SEQ29_STATE_ROWS)
+SEED_ROWS.setdefault("state_store", []).extend(_SEQ29_PINNED_STATE_ROWS)
+SEED_ROWS.setdefault("checkpoint_mgr", []).extend(_SEQ29_CHECKPOINT_ROWS)
+SEED_ROWS.setdefault("state_restore_data", []).extend(_SEQ29_RESTORE_ROWS)
+SEED_ROWS.setdefault("replay_engine", []).extend(_SEQ29_REPLAY_ROWS)

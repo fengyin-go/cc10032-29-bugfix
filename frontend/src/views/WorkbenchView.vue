@@ -86,6 +86,18 @@
       </form>
     </div>
 
+    <StateKeyPanel v-if="meta.key === 'state_store'" />
+    <RestoreDataPanel v-if="meta.key === 'state_store'" />
+    <ThresholdPanel v-if="meta.key === 'state_store'" />
+
+    <CheckpointManifestPanel v-if="meta.key === 'checkpoint_mgr'" />
+    <TodoPanel v-if="meta.key === 'checkpoint_mgr'" module="checkpoint_mgr" />
+
+    <ReplayVerifyPanel v-if="meta.key === 'replay_engine'" />
+    <TodoPanel v-if="meta.key === 'replay_engine'" module="replay_engine" />
+
+    <RestoreDataPanel v-if="meta.key === 'restore_plan'" />
+
     <footer class="page-foot">
       <span>共 {{ total }} 条{{ meta.name }}记录</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
@@ -103,6 +115,12 @@ import {
   moduleMeta,
   runAction as applyAction,
 } from '@/api/backend-service'
+import CheckpointManifestPanel from '@/components/CheckpointManifestPanel.vue'
+import ReplayVerifyPanel from '@/components/ReplayVerifyPanel.vue'
+import RestoreDataPanel from '@/components/RestoreDataPanel.vue'
+import StateKeyPanel from '@/components/StateKeyPanel.vue'
+import ThresholdPanel from '@/components/ThresholdPanel.vue'
+import TodoPanel from '@/components/TodoPanel.vue'
 import type { EntryRow } from '@/data/types'
 
 const props = defineProps<{ moduleKey: string }>()

@@ -323,14 +323,24 @@ def create_checkpoint_snapshot(
     operator_name: str,
     state: dict[str, Any],
     checkpoint_interval_sec: float = 30.0,
+    state_keys: list[str] | None = None,
 ) -> CheckpointSnapshot:
-    """创建算子状态检查点快照。"""
+    """创建算子状态检查点快照，并登记它引用的状态键。
+
+    状态键清单用于序号29的引用判定：只要检查点还引用某个键，
+    TTL 清理就不能停用它，回放发布前也要按清单核对。
+    """
     cp_id = hashlib.md5(f"{operator_name}_{time.time()}".encode()).hexdigest()[:12]
     snapshot = CheckpointSnapshot(
         checkpoint_id=cp_id,
         timestamp=time.time(),
         operator_states={operator_name: copy.deepcopy(state)},
     )
+    keys = list(state_keys or [])
+    for field in ("_state_key", "state_key", "状态键"):
+        value = state.get(field) if isinstance(state, dict) else None
+        if value and str(value) not in keys:
+            keys.append(str(value))
     cp_rows = store.rows("checkpoint_mgr")
     cp_rows.append({
         "id": cp_id,
@@ -340,6 +350,10 @@ def create_checkpoint_snapshot(
         "status": "已启用",
         "pending": False,
         "abnormal": False,
+        "checkpoint_id": cp_id,
+        "配置名称": f"{operator_name}_checkpoint",
+        "state_key_manifest": keys,
+        "snapshot_ts": snapshot.timestamp,
     })
     return snapshot
 
